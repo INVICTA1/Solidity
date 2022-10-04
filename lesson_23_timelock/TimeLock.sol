@@ -1,25 +1,51 @@
 pragma solidity ^0.8.0;
 
 contract TimeLock {
-    address public owner;
+    address[] public owners;
     string public message;
     uint public amount;
     uint constant MINDELAY = 10;
     uint constant MAXDELAY = 1 days;
     uint constant GRACEPERIOD = 1 days;
-    mapping(bytes32 => bool) public queue;
+    uint constant public CONFIRMATIONS_REQUIRED = 3;
 
-    modifier onlyOwner(){
-        require(msg.sender == owner, "not an owner");
-        _;
+    struct Transaction {
+        bytes32 uid;
+        address to;
+        uint value;
+        bytes data;
+        bool executed;
+        uint confirmations;
     }
+
+    mapping(bytes32 => Transaction) public txs;
+    // Transaction[] public txs;
+
+    mapping(bytes32 => mapping(address => bool)) public confiramtions;
+    mapping(bytes32 => bool) public queue;
+    mapping(address => bool) public isOwner;
+
 
     event Queued(address sender, bytes32 txId);
     event Discard(address sender, bytes32 txId);
     event Executed(address sender, bytes32 txId);
 
-    constructor(){
-        owner = msg.sender;
+    modifier onlyOwner(){
+        require(isOwner[msg.sender], "not an owner");
+        _;
+    }
+
+    constructor(address[] memory _owners){
+        uint owners_length = _owners.length;
+        require(owners_length >= CONFIRMATIONS_REQUIRED, "not enough owners");
+        for (uint i = 0; i < _owners.length; i++) {
+            address owner = _owners[i];
+            require(owner == address(0), "can't have zero address");
+            require(isOwner[owner], "duplicate address");
+
+            isOwner[owner] = true;
+            owners.push(owner);
+        }
     }
 
     function addToQueue(
@@ -28,7 +54,7 @@ contract TimeLock {
         bytes calldata _data,
         uint _value,
         uint _timestamp
-    ) external onlyOwner returns(bytes32){
+    ) external onlyOwner returns (bytes32){
         require(
             _timestamp >= block.timestamp + MINDELAY &&
             _timestamp < block.timestamp + MAXDELAY,
@@ -44,11 +70,54 @@ contract TimeLock {
 
         require(!queue[txId], "already queue");
         queue[txId] = true;
+        //         address to;
+        // uint value;
+        // bytes data;
+        // bool executed;
+        // uint confirmations;
+        txs[txId] = Transaction({
+        uid : txId,
+        to : address(_to),
+        value : _value,
+        data : _data,
+        executed : false,
+        confirmations : 0
+
+        });
+        // txs.push(Transaction({
+        //     uid:txId,
+        //     to:address(_to),
+        //     value: _value,
+        //     data : _data,
+        //     executed : false,
+        //     confirmations: 0
+
+        // }));
 
         emit Queued(msg.sender, txId);
 
         return txId;
 
+    }
+
+    function confirmTransaction(bytes32 _txId) external onlyOwner {
+        require(queue[_txId], "already queue");
+        require(!confiramtions[_txId][msg.sender], "already confirmed");
+
+        Transaction storage transaction = txs[_txId];
+
+        transaction.confirmations++;
+        confiramtions[_txId][msg.sender] = true;
+    }
+
+    function cancelConfirmTransaction(bytes32 _txId) external onlyOwner {
+        require(queue[_txId], "already queue");
+        require(confiramtions[_txId][msg.sender], "not confirmed");
+
+        Transaction storage transaction = txs[_txId];
+
+        transaction.confirmations--;
+        confiramtions[_txId][msg.sender] = false;
     }
 
     function execute(
@@ -69,7 +138,13 @@ contract TimeLock {
                 _timestamp
             ));
         require(queue[txId], "not queued");
+
+        Transaction storage transaction = txs[txId];
+        require(transaction.confirmations >= CONFIRMATIONS_REQUIRED, "not enough confirmations");
+
         queue[txId] = false;
+
+        transaction.executed = true;
         // or delete queue[_txId];
 
         bytes memory data;
@@ -101,7 +176,7 @@ contract TimeLock {
         return block.timestamp + time;
     }
 
-    function prepareData(string calldata _msg) external pure returns(bytes memory){
+    function prepareData(string calldata _msg) external pure returns (bytes memory){
         return abi.encode(_msg);
 
     }
